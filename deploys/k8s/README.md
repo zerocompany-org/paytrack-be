@@ -240,7 +240,29 @@ service sẽ xoá luôn namespace và kéo theo service kia.
 ### 2. Secret để pull image từ GHCR
 
 Package GHCR mặc định private, thiếu secret này pod kẹt `ImagePullBackOff`.
-Dùng một GitHub PAT (classic) có scope `read:packages`:
+
+**Cách nhanh: copy lại secret của zeromon.** Mọi service trong cụm đều pull từ
+cùng org `ghcr.io/zerocompany-org/...`, nên PAT trong `ghcr-cred` của namespace
+`zeromon` dùng được luôn cho paytrack — khỏi tạo PAT mới. Đã kiểm: PAT còn sống,
+scope đúng `read:packages`, không có ngày hết hạn, và lấy được pull token cho
+package của `zerocompany-org`.
+
+```bash
+kubectl -n zeromon get secret ghcr-cred -o json | python -c "
+import sys,json
+d=json.load(sys.stdin)
+print(json.dumps({'apiVersion':'v1','kind':'Secret','type':d['type'],
+                  'metadata':{'name':'ghcr-cred'},'data':d['data']}))
+" | kubectl -n paytrack create -f -
+```
+
+Câu python ở giữa để lột bỏ `namespace`/`uid`/`resourceVersion` của secret gốc
+(giữ lại là `create` bị từ chối), và để token không hiện ra màn hình hay rơi
+xuống file tạm. Không dùng `jq` vì máy không có sẵn.
+
+**Cách thường: tạo PAT mới.** Dùng khi không đọc được secret của `zeromon`, hoặc
+muốn PAT riêng cho paytrack để thu hồi độc lập. PAT classic, scope
+`read:packages`, tài khoản phải đọc được repo `zerocompany-org/paytrack-be`:
 
 ```bash
 kubectl -n paytrack create secret docker-registry ghcr-cred \
@@ -263,12 +285,16 @@ cp secret.example.yaml secret.yaml
 `secret.yaml` bị `.gitignore` — **không commit**. Sinh khoá:
 
 ```bash
-openssl rand -hex 32   # hmacSecretKey
-openssl rand -hex 32   # aesSecretKey — KHOA KHAC, đừng dán trùng
+openssl rand -hex 32   # hmacSecretKey — độ dài tuỳ ý
+openssl rand -hex 16   # aesSecretKey  — ra 32 ký tự, KHOA KHAC, đừng dán trùng
 ```
 
-> `aesSecretKey` mã hoá dữ liệu nhạy cảm đã lưu trong DB. **Mất khoá = mất khả
-> năng giải mã.** Cất bản sao cùng chỗ với backup DB.
+> `aesSecretKey` phải dài **đúng 16, 24 hoặc 32 ký tự** — `utils/crypt.go` đếm
+> `len()` của chuỗi chứ không decode hex, nên `rand -hex 32` (64 ký tự) làm pod
+> thoát ngay. Dùng `rand -hex 16`.
+>
+> Khoá này mã hoá dữ liệu nhạy cảm đã lưu trong DB. **Mất khoá = mất khả năng
+> giải mã.** Cất bản sao cùng chỗ với backup DB.
 
 ### 4. Domain
 
@@ -365,6 +391,7 @@ thành CronJob, và gắn Redis adapter cho socket.io trước.
 | `Forbidden` khi apply | Namespace chưa tồn tại (lần đầu phải `kubectl create -f namespace.yaml`), hoặc namespace được tạo không kèm annotation `field.cattle.io/projectId` nên không thuộc Project nào |
 | `ImagePullBackOff` | Thiếu secret `ghcr-cred`, hoặc deploy tag `sha-*` mà workflow chưa build xong |
 | Pod `CrashLoopBackOff`, log `please set up hmacSecretKey` | `hmacSecretKey` trong `secret.yaml` còn rỗng |
+| Pod thoát ngay, log `eas key length must be 16, 24 or 32` | `aesSecretKey` sai độ dài — phải đúng 16/24/32 ký tự, dùng `openssl rand -hex 16` |
 | Log `failed to init logRotator` | `logDir` trong `config.yaml` khác `/app/logs` (rootfs read-only, chỉ `/app/logs` và `/tmp` ghi được) |
 | Pod chết ngay, log `database "paytrack" does not exist` | Chưa tạo database — app không tự tạo, xem mục Postgres |
 | `duplicate key value violates unique constraint "users_pkey"` khi tạo user/payment/project mới | Dữ liệu cũ đã restore nhưng chưa chạy `legacy-01-before-boot.sql` → sequence vẫn ở 1 |
