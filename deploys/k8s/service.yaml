@@ -1,0 +1,21 @@
+# Service ClusterIP — Traefik chạy TRONG cụm (kube-system) route tới đây qua
+# IngressRoute (ingressroute.yaml). Không mở NodePort: traffic vào cụm qua đúng
+# một cổng chung của Traefik cụm, rồi Traefik phân luồng theo Host().
+#
+# Tên Service này cũng là DNS nội cụm cho service khác gọi sang:
+#   http://paytrack-be.paytrack.svc.cluster.local:6789
+apiVersion: v1
+kind: Service
+metadata:
+  name: paytrack-be
+  labels:
+    app: paytrack-be
+spec:
+  type: ClusterIP
+  selector:
+    app: paytrack-be
+  ports:
+    - name: http
+      port: 6789
+      targetPort: http
+      protocol: TCP

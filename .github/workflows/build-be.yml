@@ -1,0 +1,96 @@
+name: Build & Push BE image (GHCR)
+
+# Hệ chỉ có MỘT môi trường: merge `main` -> `prod`, push nhánh `prod` là CI build
+# và đẩy image lên GHCR.
+#
+#   push nhánh `prod` -> ghcr.io/zerocompany-org/paytrack-be/be:{latest, sha-<short>}
+#
+# Nhánh `main` KHÔNG build — chỉ để phát triển/merge.
+#
+# Thêm staging sau này: thêm `staging` vào `branches` bên dưới rồi tách tên image
+# theo `github.ref_name` (push nhánh staging -> package `be-stg` riêng, để job
+# cleanup của môi trường này không xoá nhầm version của môi trường kia).
+on:
+  push:
+    branches: [prod]
+  workflow_dispatch: {}
+
+# Push liên tiếp lên cùng một nhánh: huỷ run cũ, chỉ build cái mới nhất.
+concurrency:
+  group: build-be-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-push:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write # cần để push lên GHCR
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Login to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Docker metadata (tags & labels)
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          # github.repository = zerocompany-org/paytrack-be -> package nested
+          # `paytrack-be/be`, thừa kế quyền của repo nên GITHUB_TOKEN đủ để push.
+          # metadata-action tự lowercase phần owner.
+          images: ghcr.io/${{ github.repository }}/be
+          # `latest` để lần apply đầu tiên có cái mà pull; `sha-<short>` là tag
+          # cố định dùng cho deploy/rollback qua deploy.sh.
+          tags: |
+            type=raw,value=latest
+            type=sha,format=short
+
+      - name: Build & push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha,scope=be
+          cache-to: type=gha,mode=max,scope=be
+          # BẮT BUỘC tắt: job `cleanup` chỉ giữ 3 version. Bật provenance/sbom thì
+          # mỗi build đẩy lên OCI index + manifest con, GHCR đếm mỗi manifest con
+          # là 1 version -> job dọn dẹp xoá nhầm manifest con của chính image vừa
+          # push, làm image không pull được.
+          provenance: false
+          sbom: false
+          # KHÔNG có build-args: mgmtngd đọc toàn bộ cấu hình từ file config.yaml
+          # lúc chạy (mount từ Secret trong k8s), không bake gì vào image.
+
+  # ---------------------------------------------------------------------------
+  # Dọn version cũ. Package private tính dung lượng vào quota của org, mỗi lần
+  # push lại sinh thêm một version -> không dọn thì phình dần.
+  # ---------------------------------------------------------------------------
+  cleanup:
+    name: Dọn version cũ trên GHCR
+    needs: build-push
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      packages: write # cần để xoá package version
+    steps:
+      - name: Chỉ giữ lại 3 version gần nhất
+        uses: actions/delete-package-versions@v5
+        with:
+          owner: ${{ github.repository_owner }}
+          # Package nested: tên = phần sau owner = "paytrack-be/be".
+          package-name: ${{ github.event.repository.name }}/be
+          package-type: container
+          # 3 = bản đang chạy + 2 bản trước. Chỉ có một môi trường nên không cần
+          # giữ nhiều; cũ hơn bị XOÁ VĨNH VIỄN (hết đường rollback xa hơn).
+          min-versions-to-keep: 3

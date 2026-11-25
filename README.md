@@ -26,7 +26,26 @@ PayTrack is a comprehensive payment management system built with Go, designed to
 
 ## Installation & Deployment
 
-PayTrack can be deployed using two methods:
+PayTrack can be deployed using three methods:
+
+### Method 0: Kubernetes (GHCR + Traefik)
+
+Manifests live in [`deploys/k8s`](deploys/k8s). Merging `main` into the `prod` branch
+triggers [`.github/workflows/build-be.yml`](.github/workflows/build-be.yml), which builds
+and pushes `ghcr.io/zerocompany-org/paytrack-be/be` (tags `latest` + `sha-<short>`).
+
+```bash
+cd deploys/k8s
+kubectl apply -f namespace.yaml
+cp secret.example.yaml secret.yaml   # fill in DSN + keys, never committed
+kubectl apply -k .
+./deploy.sh sha-<commit>             # subsequent deploys
+```
+
+Read [`deploys/k8s/README.md`](deploys/k8s/README.md) first — it explains why the whole
+configuration lives in a single Secret (`mgmtngd` does **not** read environment
+variables; `config.production.yaml` and its `${VAR}` placeholders are **not** expanded)
+and why the Deployment is pinned to `replicas: 1` with `strategy: Recreate`.
 
 ### Method 1: Docker Compose (Recommended)
 

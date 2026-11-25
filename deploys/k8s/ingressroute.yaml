@@ -1,0 +1,36 @@
+# IngressRoute (CRD của Traefik) — KHÔNG dùng Ingress chuẩn của Kubernetes.
+#
+# Kiến trúc: TLS terminate ở Traefik VPS (NGOÀI cụm). Traefik VPS forward HTTP
+# thuần vào NodePort của Traefik k8s, nên router ở đây nghe entrypoint HTTP
+# ("web"), KHÔNG phải "websecure". Cert do Traefik VPS giữ; Traefik k8s không xử
+# lý HTTPS nên không khai mục "tls".
+#
+# Kiểm tên entrypoint / NodePort thực tế của Traefik cụm:
+#   kubectl get svc -n kube-system traefik -o yaml | grep -A4 nodePort
+# Nếu bản cài dùng tên entrypoint khác ("http"), sửa "web" bên dưới cho khớp.
+#
+# MỘT rule bắt trọn host là đủ: route.go phục vụ cả "/" (health), "/api/**" và
+# "/socket.io/" trên cùng một cổng. Traefik tự nâng cấp WebSocket (Connection:
+# Upgrade) nên /socket.io/ không cần cấu hình thêm.
+#
+# CORS: app tự xử lý bằng middleware chi (route.go cho phép mọi origin http/https),
+# nên KHÔNG gắn middleware cors của Traefik — gắn thêm sẽ thành header trùng lặp
+# và trình duyệt chặn.
+apiVersion: traefik.io/v1alpha1
+kind: IngressRoute
+metadata:
+  name: paytrack-be
+  labels:
+    app: paytrack-be
+spec:
+  entryPoints:
+    - web
+  routes:
+    # PRODUCTION: domain API thật (khớp BASE_URL trong .env.production). Phải khớp DNS
+    # trỏ về Traefik VPS, và khớp BASE_URL mà FE production build vào bundle
+    # (paytrack-fe: .github/workflows/build-fe.yml -> vars.BASE_URL).
+    - match: Host(`api-paytrack.zerornd.com`)
+      kind: Rule
+      services:
+        - name: paytrack-be
+          port: 6789

@@ -1,0 +1,177 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: paytrack-be
+  labels:
+    app: paytrack-be
+spec:
+  # BẮT BUỘC 1 — KHÔNG scale lên. Ba lý do, mỗi lý do đủ để hỏng nếu chạy 2 pod:
+  #   1. storage.NewStorage() chạy autoMigrate() mỗi lần boot -> 2 pod migrate
+  #      song song trên cùng schema.
+  #   2. service.RunTimeTask() + NotifyCryptoPriceChanged() là cron singleton ->
+  #      2 pod = gửi mail/thông báo trùng.
+  #   3. socket.io (go-socket.io) giữ state phiên TRONG BỘ NHỚ pod, không có
+  #      adapter Redis -> client bị load-balance sang pod khác là mất room.
+  # Muốn nhiều replica thì phải tách migration thành Job, cron thành CronJob và
+  # gắn Redis adapter cho socket.io trước đã.
+  replicas: 1
+
+  # Recreate chứ không RollingUpdate: xem lý do ở `replicas` — không được phép có
+  # 2 pod chạy chồng nhau dù chỉ vài giây trong lúc rollout. Đánh đổi: có ~10-20s
+  # downtime mỗi lần deploy (thời gian pod mới chạy autoMigrate rồi mở cổng).
+  strategy:
+    type: Recreate
+
+  selector:
+    matchLabels:
+      app: paytrack-be
+
+  template:
+    metadata:
+      labels:
+        app: paytrack-be
+    spec:
+      # App KHÔNG xử lý SIGTERM (webserver.Run() chặn ở ListenAndServe, không có
+      # graceful shutdown). 30s là dư để K8s đóng kết nối rồi SIGKILL.
+      terminationGracePeriodSeconds: 30
+
+      # GHCR để package private mặc định -> cần secret `ghcr-cred` để pull, nếu
+      # không pod kẹt ImagePullBackOff. Đổi package sang public thì bỏ được khối
+      # này. Cách tạo secret: xem deploys/k8s/README.md mục "Thiết lập 1 lần".
+      imagePullSecrets:
+        - name: ghcr-cred
+
+      securityContext:
+        runAsNonRoot: true
+        # Khớp `adduser -u 1001 -G paytrack paytrack` trong Dockerfile.
+        runAsUser: 1001
+        runAsGroup: 1001
+        # fsGroup BẮT BUỘC: kubelet dựa vào nó để gán group cho Secret volume
+        # (mode 0440, pod đọc qua quyền group) và cấp quyền ghi cho 2 emptyDir
+        # bên dưới. Bỏ dòng này -> mgmtngd không đọc được config, hoặc không ghi
+        # được /app/logs.
+        fsGroup: 1001
+        seccompProfile:
+          type: RuntimeDefault
+
+      containers:
+        - name: paytrack-be
+          # PRODUCTION dùng package `be` (build-be.yml đẩy khi push nhánh
+          # `prod`). Tag: latest, sha-<commit>. `:latest` chỉ cho lần apply
+          # đầu; deploy chuẩn dùng tag sha-* cố định qua deploy.sh để rollback
+          # đúng bản.
+          image: ghcr.io/zerocompany-org/paytrack-be/be:latest
+          # Deploy theo tag sha-* nên IfNotPresent là đủ (tag mới luôn buộc pull).
+          # Nếu giữ nguyên :latest thì phải đổi sang Always, không thì node xài
+          # cache cũ.
+          imagePullPolicy: IfNotPresent
+
+          # Không khai `command`/`args`: Dockerfile đã CMD
+          # ["./mgmtngd", "--config=./private/config.yaml"], WORKDIR /app ->
+          # đọc /app/private/config.yaml, đúng chỗ Secret được mount bên dưới.
+
+          ports:
+            - name: http
+              containerPort: 6789
+
+          env:
+            # Chỉ ảnh hưởng dấu thời gian trong log của pod. Múi giờ DB nằm trong
+            # chuỗi DSN (TimeZone=...) ở Secret, không lấy từ đây.
+            - name: TZ
+              value: Asia/Ho_Chi_Minh
+
+          # KHÔNG có envFrom: mgmtngd không đọc biến môi trường, toàn bộ cấu hình
+          # nằm trong file config.yaml mount từ Secret. Xem secret.example.yaml.
+
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+
+          volumeMounts:
+            # Secret -> /app/private/config.yaml. Mount cả thư mục (không subPath)
+            # để `kubectl apply` Secret mới là file trong pod tự cập nhật — dù vẫn
+            # phải rollout restart vì app chỉ đọc lúc boot.
+            - name: config
+              mountPath: /app/private
+              readOnly: true
+            # logDir trong config.yaml trỏ vào đây. rootfs read-only nên thiếu
+            # volume này pod chết ở "failed to init logRotator".
+            - name: logs
+              mountPath: /app/logs
+            # r.ParseMultipartForm(10MB) ở api_file_upload.go tràn phần dư ra
+            # os.TempDir() = /tmp. rootfs read-only nên phải có volume này.
+            - name: tmp
+              mountPath: /tmp
+
+          # route.go chỉ có 3 nhánh: "/", "/socket.io/", "/api/...". KHÔNG có
+          # /health — HEALTHCHECK trong Dockerfile (wget /health) là sai, nhưng K8s
+          # bỏ qua HEALTHCHECK của image nên không ảnh hưởng. Probe dùng "/":
+          # handler trả 200 "MGMT-NG API is up and running", không chạm DB.
+          #
+          # Cổng HTTP chỉ mở SAU khi autoMigrate xong, nên "/" trả lời được nghĩa
+          # là migration đã chạy xong. 40 x 3s = 120s cho lần đầu tạo bảng.
+          startupProbe:
+            httpGet:
+              path: /
+              port: http
+            periodSeconds: 3
+            failureThreshold: 40
+
+          livenessProbe:
+            httpGet:
+              path: /
+              port: http
+            periodSeconds: 20
+            timeoutSeconds: 3
+            failureThreshold: 3
+
+          # "/" không chạm DB nên readiness KHÔNG phát hiện được mất kết nối
+          # Postgres. Đây là giới hạn của app (chưa có endpoint /readyz), không
+          # phải thiếu sót cấu hình — xem README mục "Hạn chế đã biết".
+          readinessProbe:
+            httpGet:
+              path: /
+              port: http
+            periodSeconds: 20
+            timeoutSeconds: 3
+            failureThreshold: 2
+
+          lifecycle:
+            preStop:
+              exec:
+                # Chờ kube-proxy gỡ pod khỏi Endpoints trước khi app nhận SIGTERM.
+                command: ["/bin/sh", "-c", "sleep 5"]
+
+          resources:
+            requests:
+              cpu: 200m
+              memory: 256Mi
+            limits:
+              # Không đặt limit CPU: throttle lúc quy đổi tỷ giá / render report
+              # làm xấu đuôi p99 đúng lúc đang bận. Limit bộ nhớ thì có, để rò rỉ
+              # dừng lại ở pod.
+              memory: 512Mi
+
+      volumes:
+        - name: config
+          secret:
+            secretName: paytrack-be-secret
+            # 0440 chứ KHÔNG phải 0400: kubelet gán file cho root:<fsGroup>, pod
+            # chạy uid 1001 nên chỉ đọc được qua quyền GROUP. Để 0400 là
+            # permission denied ngay lúc mgmtngd mở config.
+            defaultMode: 0440
+        - name: logs
+          emptyDir:
+            sizeLimit: 512Mi
+        - name: tmp
+          emptyDir:
+            sizeLimit: 256Mi
+
+      # KHÔNG mount volume cho ảnh upload: utils/helper.go dựng đường dẫn kiểu
+      # Windows (getBinPath() + "\upload\images"), trên Linux dấu "\" không phải
+      # separator nên file rơi thẳng vào thư mục gốc "/" với tên chứa "\". Không
+      # có mountPath nào hứng được. Hệ thống đang chạy không dùng tính năng upload
+      # (chỉ lưu text) nên chấp nhận; muốn bật thì sửa code sang filepath.Join
+      # trước — xem README mục "Hạn chế đã biết".

@@ -1,0 +1,9 @@
+# Cùng nguyên tắc với .env: cấu hình của MỘT nơi triển khai thì không commit,
+# chỉ commit bản .example để biết cần điền những gì.
+#
+# Deployment/Service/IngressRoute KHÔNG nằm ở đây — chúng giống nhau ở mọi cụm.
+#
+# Pattern không có dấu "/" đầu nên khớp ở MỌI cấp thư mục — tự động bao cả
+# prod/ và stg/ (vd prod/secret.yaml, stg/secret.yaml).
+secret.yaml
+configmap.yaml

@@ -1,0 +1,32 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+# PRODUCTION: mọi resource nằm trong namespace `paytrack`. Namespace được khai ở
+# namespace.yaml nhưng apply RIÊNG (`kubectl apply -f namespace.yaml`), KHÔNG
+# liệt kê trong resources bên dưới — xem lý do trong namespace.yaml.
+namespace: paytrack
+
+resources:
+  # secret.yaml là bản THẬT của từng nơi triển khai, bị .gitignore. Trước lần
+  # apply đầu phải chép từ .example rồi điền:
+  #   cp secret.example.yaml secret.yaml
+  - secret.yaml
+  - deployment.yaml
+  - service.yaml
+  - ingressroute.yaml
+
+# `commonLabels` đã deprecated. Dùng `labels` và KHÔNG bật includeSelectors:
+# selector của Deployment/Service là bất biến sau khi tạo, để kustomize tự chèn
+# vào đó sẽ lỗi khi apply lại. Selector cần thiết đã khai tường minh trong
+# deployment.yaml / service.yaml.
+labels:
+  - pairs:
+      app: paytrack-be
+      # Gom BE + FE lại để truy vấn chung, giống zauto/zeromon:
+      #   kubectl -n paytrack get all -l app.kubernetes.io/part-of=paytrack
+      app.kubernetes.io/part-of: paytrack
+    includeSelectors: false
+
+# Không dùng secretGenerator: generator gắn hậu tố hash vào tên Secret
+# (paytrack-be-secret-abc123) và deployment.yaml tham chiếu tên cố định. Secret
+# khai tường minh thì `kubectl apply -k .` là đủ, đổi cấu hình thì rollout restart.
